@@ -22,8 +22,8 @@ main(void)
   for(;;){
     printf(1, "init: starting sh\n");
     printf(1, "Group #7:\n");
-    printf(1, "1. Shayan AliMirzaei\n");
-    printf(1, "2. Behina AnsariRad\n");
+    printf(1, "1. Shayan Mirzaei\n");
+    printf(1, "2. Behyna AnsariRad\n");
     printf(1, "3. Ali Mehrani\n");
     pid = fork();
     if(pid < 0){
