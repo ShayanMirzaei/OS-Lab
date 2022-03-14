@@ -15,6 +15,32 @@
 #include "proc.h"
 #include "x86.h"
 
+#define ARROW_UP 0xE2
+#define ARROW_DOWN 0xE3
+#define ARROW_LEFT 0xE4
+#define ARROW_RIGHT 0xE5
+
+#define HISTORY_BUF 10
+
+#define INPUT_BUF 128
+struct {
+  char buf[INPUT_BUF];
+  uint r;  // Read index
+  uint w;  // Write index
+  uint e;  // Edit index
+  uint l;  // Last index
+} input;
+
+char charstomove[INPUT_BUF];
+
+struct {
+  char cmds[HISTORY_BUF][INPUT_BUF];
+  uint cmdlength[HISTORY_BUF];
+  uint r; // Read index
+  uint w; // Write index
+  uint numofcmds;
+} history;
+
 static void consputc(int);
 
 static int panicked = 0;
@@ -123,28 +149,128 @@ panic(char *s)
     ;
 }
 
+void rstchars() {
+  for(uint i = 0; i < INPUT_BUF; i++) {
+    charstomove[i] = '\0';
+  }
+}
+
+void savechars() {
+  uint n = input.l - input.r;
+  for (uint i = 0; i < n; i++) {
+    charstomove[i] = input.buf[(input.e + i) % INPUT_BUF];
+  }
+}
+
+void shiftbufr() {
+  uint n = input.l - input.e;
+  for (uint i = 0; i < n; i++) {
+    input.buf[(input.e + i) % INPUT_BUF] = charstomove[i];
+    consputc(charstomove[i]);
+  }
+  rstchars();
+  while (n--) {
+    consputc(ARROW_LEFT);
+  }
+}
+
+void shiftbufl() {
+  uint n = input.l - input.e;
+  consputc(ARROW_LEFT);
+  for (uint i = 0; i < n; i++) {
+    input.buf[(input.e + i - 1) % INPUT_BUF] = input.buf[(input.e + i) % INPUT_BUF];
+    consputc(input.buf[(input.e + i) % INPUT_BUF]);
+  }
+  input.e--;
+  input.l--;
+  consputc(' ');
+  for (int i = n + 1; i > 0; i--)
+    consputc(ARROW_LEFT);
+
+}
+
+void savecmd() {
+  uint n = input.l - input.r - 1;
+  history.r = history.w;
+  if (n <= 0)
+    return;
+  if (history.w == HISTORY_BUF) {
+    history.w = 0;
+    history.r = 0;
+  }
+  
+  history.cmdlength[history.w] = n;
+  for (int i = 0; i < n; i++) {
+    history.cmds[history.w][i] = input.buf[(input.r + i) % INPUT_BUF];
+  }
+
+  history.w++;
+  if (history.numofcmds < HISTORY_BUF)
+    history.numofcmds++;
+}
+
+void printcmd() {
+
+  uint cdmindex = history.r;
+  if (history.r == 0) {
+    if (history.numofcmds == HISTORY_BUF) 
+      history.r = HISTORY_BUF - 1;
+  }
+  else 
+    history.r--;
+  for (int i = 0; i < history.cmdlength[cdmindex]; i++) {
+    input.buf[(input.r + i) % INPUT_BUF] = history.cmds[cdmindex][i];
+    consputc(history.cmds[cdmindex][i]);
+    input.e++;
+    input.l++;
+  }
+}
+
 //PAGEBREAK: 50
 #define BACKSPACE 0x100
 #define CRTPORT 0x3d4
 static ushort *crt = (ushort*)P2V(0xb8000);  // CGA memory
 
+
+void clearline() {
+  if (input.e < input.l) {
+    while(input.e != input.l) {
+        input.e++;
+        consputc(ARROW_RIGHT);
+    }
+  }
+  while(input.e != input.w &&
+    input.buf[(input.e-1) % INPUT_BUF] != '\n'){
+      input.e--;
+      input.l--;
+      consputc(BACKSPACE);
+    }
+}
+
 static void
 cgaputc(int c)
 {
   int pos;
-
+  int rm_last = c != ARROW_LEFT && c != ARROW_RIGHT;
   // Cursor position: col + 80*row.
   outb(CRTPORT, 14);
   pos = inb(CRTPORT+1) << 8;
   outb(CRTPORT, 15);
   pos |= inb(CRTPORT+1);
-
   if(c == '\n')
     pos += 80 - pos%80;
   else if(c == BACKSPACE){
     if(pos > 0) --pos;
-  } else
-    crt[pos++] = (c&0xff) | 0x0700;  // black on white
+  } 
+  else if (c == ARROW_LEFT) {
+    if(pos > 0) --pos;
+  }
+  else if (c == ARROW_RIGHT) {
+    pos++;
+  } 
+  else {
+    crt[pos++] = (c&0xff) | 0x0700; // black on white
+  }
 
   if(pos < 0 || pos > 25*80)
     panic("pos under/overflow");
@@ -159,7 +285,7 @@ cgaputc(int c)
   outb(CRTPORT+1, pos>>8);
   outb(CRTPORT, 15);
   outb(CRTPORT+1, pos);
-  crt[pos] = ' ' | 0x0700;
+  if (rm_last) crt[pos] = ' ' | 0x0700;
 }
 
 void
@@ -173,18 +299,14 @@ consputc(int c)
 
   if(c == BACKSPACE){
     uartputc('\b'); uartputc(' '); uartputc('\b');
+  } else if(c == ARROW_LEFT) {
+    uartputc('\b');
+  } else if(c == ARROW_RIGHT) {
+    uartputc(input.buf[input.e % INPUT_BUF]);
   } else
     uartputc(c);
   cgaputc(c);
 }
-
-#define INPUT_BUF 128
-struct {
-  char buf[INPUT_BUF];
-  uint r;  // Read index
-  uint w;  // Write index
-  uint e;  // Edit index
-} input;
 
 #define C(x)  ((x)-'@')  // Control-x
 
@@ -201,24 +323,57 @@ consoleintr(int (*getc)(void))
       doprocdump = 1;
       break;
     case C('U'):  // Kill line.
-      while(input.e != input.w &&
-            input.buf[(input.e-1) % INPUT_BUF] != '\n'){
-        input.e--;
-        consputc(BACKSPACE);
-      }
+      clearline();
       break;
     case C('H'): case '\x7f':  // Backspace
       if(input.e != input.w){
-        input.e--;
-        consputc(BACKSPACE);
+        if(input.l > input.e) {
+          shiftbufl();
+        }
+        else {
+          input.e--;
+          input.l--;
+          consputc(BACKSPACE);
+        }
       }
       break;
+    case ARROW_LEFT:
+      if (input.e != input.w) {
+        input.e--;
+        consputc(c);
+      }
+      break;
+    case ARROW_RIGHT:
+      if (input.e < input.l) {
+        consputc(c);
+        input.e++;
+      }
+      break;
+    case ARROW_UP:
+      clearline();
+      printcmd();
+      break;
     default:
+      if (c == 'r' || c == '\n') input.e = input.l;
       if(c != 0 && input.e-input.r < INPUT_BUF){
         c = (c == '\r') ? '\n' : c;
-        input.buf[input.e++ % INPUT_BUF] = c;
-        consputc(c);
+        if (input.l > input.e) {
+          savechars();
+          input.buf[input.e % INPUT_BUF] = c;
+          input.e++;
+          input.l++;
+          consputc(c);
+          shiftbufr();
+        }
+        else {
+          input.buf[input.e % INPUT_BUF] = c;
+          input.e++;
+          input.l = input.e - input.l == 1 ? input.e : input.l;
+          consputc(c);
+        }
+        
         if(c == '\n' || c == C('D') || input.e == input.r+INPUT_BUF){
+          savecmd();
           input.w = input.e;
           wakeup(&input.r);
         }
